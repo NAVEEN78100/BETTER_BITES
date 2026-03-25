@@ -11,7 +11,7 @@ export default function AdminLoginScreen() {
 
   const handleAdminLogin = () => {
     if (email === 'admin' && password === 'admin123') {
-      router.replace('/admin-dashboard');
+      router.replace('/admin/admin-dashboard');
     } else if (email === 'manager' && password === 'manager123') {
       router.replace('/manager/manager-dashboard');
     } else {

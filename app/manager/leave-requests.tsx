@@ -9,7 +9,7 @@ import ManagerLayout from '../../components/ManagerLayout';
 import { db } from '../../src/firebase/firebaseConfig';
 import {
   collection, query, where, getDocs,
-  doc, updateDoc, serverTimestamp,
+  doc, updateDoc, serverTimestamp, addDoc
 } from 'firebase/firestore';
 
 interface LeaveRequest {
@@ -59,15 +59,24 @@ function LeaveCard({
 }: {
   item: LeaveRequest;
   index: number;
-  onAction: (id: string, action: 'approved' | 'rejected') => void;
+  onAction: (id: string, action: 'approved' | 'rejected', studentId: string, notify: boolean) => Promise<void>;
 }) {
   const [processing, setProcessing] = useState(false);
   const [done, setDone] = useState(false);
+  const [status, setStatus] = useState<'pending' | 'approved' | 'rejected'>('pending');
 
   const handlePress = async (action: 'approved' | 'rejected') => {
     if (processing) return;
     setProcessing(true);
-    await onAction(item.id, action);
+    await onAction(item.id, action, item.studentId, false);
+    setStatus(action);
+    setProcessing(false);
+  };
+
+  const handleNotify = async () => {
+    if (processing) return;
+    setProcessing(true);
+    await onAction(item.id, status === 'pending' ? 'approved' : status, item.studentId, true);
     setDone(true);
   };
 
@@ -103,8 +112,10 @@ function LeaveCard({
                 </View>
               </View>
             </View>
-            <View style={styles.pendingBadge}>
-              <Text style={styles.pendingText}>Pending</Text>
+            <View style={[styles.pendingBadge, status === 'approved' && {backgroundColor: '#D1FAE5'}, status === 'rejected' && {backgroundColor: '#FEE2E2'}]}>
+              <Text style={[styles.pendingText, status === 'approved' && {color: '#10B981'}, status === 'rejected' && {color: '#EF4444'}]}>
+                {status === 'pending' ? 'Pending' : (status === 'approved' ? 'Approved' : 'Rejected')}
+              </Text>
             </View>
           </View>
 
@@ -122,7 +133,7 @@ function LeaveCard({
           {/* Action Buttons */}
           {processing ? (
             <ActivityIndicator color="#FF7A00" style={{ marginTop: 8 }} />
-          ) : (
+          ) : status === 'pending' ? (
             <View style={styles.btnRow}>
               <Btn
                 label="Approve"
@@ -137,6 +148,16 @@ function LeaveCard({
                 color="#EF4444"
                 bg="#FEE2E2"
                 onPress={() => handlePress('rejected')}
+              />
+            </View>
+          ) : (
+            <View style={styles.btnRow}>
+              <Btn
+                label="Notify Student"
+                icon="bell-ring-outline"
+                color="#3B82F6"
+                bg="#DBEAFE"
+                onPress={handleNotify}
               />
             </View>
           )}
@@ -208,18 +229,44 @@ export default function LeaveRequests() {
   }, []);
 
   const handleAction = useCallback(
-    async (id: string, action: 'approved' | 'rejected') => {
+    async (id: string, action: 'approved' | 'rejected', studentId: string, isNotifyOnly: boolean) => {
       try {
-        await updateDoc(doc(db, 'sickleave', id), {
-          status: action,
-          processedAt: serverTimestamp(),
-        });
-        showToast(
-          action === 'approved' ? 'Leave request approved ✓' : 'Leave request rejected',
-          action === 'approved' ? 'approve' : 'reject',
-        );
+        if (!isNotifyOnly) {
+          await updateDoc(doc(db, 'sickleave', id), {
+            status: action,
+            processedAt: serverTimestamp(),
+          });
+          showToast(
+            action === 'approved' ? 'Leave request approved ✓' : 'Leave request rejected',
+            action === 'approved' ? 'approve' : 'reject',
+          );
+        } else {
+          // Send notification
+          const title = action === 'approved' ? 'Sick Leave Approved' : 'Sick Leave Rejected';
+          const message = action === 'approved' 
+            ? 'Your request has been approved. A healthy meal will be arranged.' 
+            : 'Your sick leave request was rejected.';
+
+          const notifData: any = {
+            userId: studentId,
+            title,
+            message,
+            type: 'leave',
+            status: action,
+            read: false,
+            timestamp: new Date()
+          };
+
+          if (action === 'approved') {
+            notifData.healthyMeal = 'Yes';
+          }
+
+          await addDoc(collection(db, 'notifications'), notifData);
+
+          showToast('Student notified successfully', 'approve');
+        }
       } catch (e) {
-        console.error('Leave update error:', e);
+        console.error('Action error:', e);
       }
     },
     []

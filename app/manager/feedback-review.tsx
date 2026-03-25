@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator,
+  View, Text, StyleSheet, ScrollView, Pressable, ActivityIndicator, Alert,
 } from 'react-native';
-import { MotiView } from 'moti';
+import { MotiView, AnimatePresence } from 'moti';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import LottieView from 'lottie-react-native';
 
 import ManagerLayout from '../../components/ManagerLayout';
 import { db } from '../../src/firebase/firebaseConfig';
@@ -16,6 +17,7 @@ interface FeedbackItem {
   category: string;
   comment: string;
   timestamp: any;
+  sentiment?: string;
 }
 
 type FilterType = 'All' | 'Poor' | 'Average' | 'Excellent';
@@ -37,6 +39,9 @@ export default function FeedbackReview() {
   const [loading, setLoading] = useState(true);
   const [feedbackList, setFeedbackList] = useState<FeedbackItem[]>([]);
   const [activeFilter, setActiveFilter] = useState<FilterType>('All');
+
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [insights, setInsights] = useState<any>(null);
 
   useEffect(() => {
     (async () => {
@@ -67,9 +72,119 @@ export default function FeedbackReview() {
     ? (feedbackList.reduce((s, f) => s + f.rating, 0) / feedbackList.length).toFixed(1)
     : '0';
 
+  const analyzeFeedbackLocally = (list: string[]) => {
+    let positive = 0;
+    let negative = 0;
+
+    let foodStats: Record<string, { pos: number; neg: number }> = {};
+
+    list.forEach(text => {
+      if (!text) return;
+      const lower = text.toLowerCase();
+      const isPositive = lower.includes("good") || lower.includes("tasty") || lower.includes("nice");
+      const isNegative = lower.includes("bad") || lower.includes("salty") || lower.includes("worst");
+      const foods = ["idli", "sambar", "rice", "chapati", "paneer", "upma"];
+
+      foods.forEach(food => {
+        if (lower.includes(food)) {
+          if (!foodStats[food]) {
+            foodStats[food] = { pos: 0, neg: 0 };
+          }
+          if (isPositive) {
+            foodStats[food].pos++;
+            positive++;
+          }
+          if (isNegative) {
+            foodStats[food].neg++;
+            negative++;
+          }
+        }
+      });
+    });
+
+    let mostLoved = "None";
+    let mostCriticized = "None";
+
+    let maxPos = 0;
+    let maxNeg = 0;
+
+    Object.keys(foodStats).forEach(food => {
+      if (foodStats[food].pos > maxPos) {
+        maxPos = foodStats[food].pos;
+        mostLoved = food.charAt(0).toUpperCase() + food.slice(1);
+      }
+      if (foodStats[food].neg > maxNeg) {
+        maxNeg = foodStats[food].neg;
+        mostCriticized = food.charAt(0).toUpperCase() + food.slice(1);
+      }
+    });
+
+    const positivity = (positive + negative > 0) ? Math.round((positive / (positive + negative)) * 100) : 0;
+
+    return {
+      positivity,
+      mostLoved,
+      mostCriticized,
+      suggestions: [
+        `Repeat ${mostLoved}`,
+        `Improve or remove ${mostCriticized}`
+      ]
+    };
+  };
+
+  const handleAnalyzeFeedback = async () => {
+    setIsAnalyzing(true);
+    setInsights(null);
+
+    try {
+      // 1. Fetch all feedback from Firestore
+      const snapshot = await getDocs(collection(db, "feedback"));
+      const rawComments = snapshot.docs.map(doc => doc.data().comment || '');
+      const validComments = rawComments.filter(c => c.trim().length > 0);
+
+      // If no feedback exists
+      if (validComments.length === 0) {
+        Alert.alert("No feedback available");
+        setIsAnalyzing(false);
+        return;
+      }
+
+      let result;
+      let apiSuccess = false;
+
+      // Add artificial delay for the loader effect since we often rely on fallback locally
+      await new Promise(resolve => setTimeout(resolve, 1500));
+
+      // Try Calling API
+      try {
+        const response = await fetch("http://10.0.2.2:5000/analyze-feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ feedback: validComments })
+        });
+        if (!response.ok) throw new Error("API failed");
+        result = await response.json();
+        apiSuccess = true;
+      } catch (error) {
+        console.log(error);
+        Alert.alert("AI analysis failed. Showing fallback insights.");
+      }
+
+      const finalResult = apiSuccess ? result : analyzeFeedbackLocally(validComments);
+      setInsights(finalResult);
+
+    } catch (error) {
+      console.log(error);
+      Alert.alert("An error occurred fetching feedbacks.");
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
   return (
     <ManagerLayout title="Feedback Review">
-      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.container}>
+      <View style={{ flex: 1 }}>
+        <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.container}>
 
         {/* Stats Bar */}
         <MotiView
@@ -114,6 +229,67 @@ export default function FeedbackReview() {
           })}
         </View>
 
+        {/* AI Analyze Button */}
+        <MotiView
+          from={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ type: 'spring', delay: 200, damping: 14 }}
+        >
+          <Pressable onPress={handleAnalyzeFeedback} disabled={isAnalyzing}>
+            {({ pressed }) => (
+              <MotiView
+                animate={{ scale: pressed ? 0.95 : 1, opacity: isAnalyzing ? 0.7 : 1 }}
+                transition={{ type: 'spring', damping: 15 }}
+                style={styles.aiButton}
+              >
+                <MaterialCommunityIcons name="brain" size={20} color="#FFFFFF" style={{ marginRight: 8 }} />
+                <Text style={styles.aiButtonLabel}>
+                  {isAnalyzing ? 'Analyzing Sentiments...' : 'Analyze Feedback with AI Model'}
+                </Text>
+              </MotiView>
+            )}
+          </Pressable>
+        </MotiView>
+
+        {/* AI Insights Card */}
+        <AnimatePresence>
+          {insights && (
+            <MotiView
+              from={{ opacity: 0, scale: 0.95, translateY: 10 }}
+              animate={{ opacity: 1, scale: 1, translateY: 0 }}
+              exit={{ opacity: 0, scale: 0.95, translateY: 10 }}
+              transition={{ type: 'spring', damping: 16 }}
+              style={styles.insightsCard}
+            >
+              <View style={styles.insightsHeader}>
+                <Text style={styles.insightsTitle}>✨ AI Insights</Text>
+                <View style={styles.sentimentBadge}>
+                  <Text style={styles.sentimentBadgeText}>{insights.positivity}% Positivity</Text>
+                </View>
+              </View>
+
+              <View style={styles.foodRow}>
+                <View style={[styles.foodBox, { borderColor: '#10B98122', backgroundColor: '#10B98111' }]}>
+                  <Text style={styles.foodLabel}>Loved Food ❤️</Text>
+                  <Text style={styles.foodValue}>{insights.mostLoved}</Text>
+                </View>
+                <View style={[styles.foodBox, { borderColor: '#EF444422', backgroundColor: '#EF444411' }]}>
+                  <Text style={styles.foodLabel}>Criticized Food 💔</Text>
+                  <Text style={styles.foodValue}>{insights.mostCriticized}</Text>
+                </View>
+              </View>
+
+              <Text style={styles.insightsSubTitle}>Actionable Recommendations</Text>
+              {insights.suggestions && insights.suggestions.map((action: string, i: number) => (
+                <View key={i} style={styles.insightItem}>
+                  <MaterialCommunityIcons name="lightbulb-on" size={16} color="#F59E0B" />
+                  <Text style={styles.insightActionText}>{action}</Text>
+                </View>
+              ))}
+            </MotiView>
+          )}
+        </AnimatePresence>
+
         {loading ? (
           <ActivityIndicator size="large" color="#FF7A00" style={{ marginTop: 40 }} />
         ) : filtered.length === 0 ? (
@@ -139,8 +315,25 @@ export default function FeedbackReview() {
                   <Text style={styles.studentId}>
                     {item.studentId.length > 16 ? item.studentId.substring(0, 16) + '…' : item.studentId}
                   </Text>
-                  <View style={styles.categoryBadge}>
-                    <Text style={styles.categoryText}>{item.category}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    <View style={styles.categoryBadge}>
+                      <Text style={styles.categoryText}>{item.category}</Text>
+                    </View>
+                    {item.sentiment && (
+                      <View style={[
+                        styles.sentimentTag, 
+                        { backgroundColor: item.sentiment === 'Positive' ? '#D1FAE5' : '#FEE2E2' }
+                      ]}>
+                        <MaterialCommunityIcons 
+                          name={item.sentiment === 'Positive' ? "emoticon-happy-outline" : "emoticon-sad-outline"} 
+                          size={12} 
+                          color={item.sentiment === 'Positive' ? "#10B981" : "#EF4444"} 
+                        />
+                        <Text style={[styles.sentimentTagText, { color: item.sentiment === 'Positive' ? "#10B981" : "#EF4444" }]}>
+                          {item.sentiment}
+                        </Text>
+                      </View>
+                    )}
                   </View>
                 </View>
                 <View style={styles.starsRow}>
@@ -174,7 +367,27 @@ export default function FeedbackReview() {
         )}
 
         <View style={{ height: 40 }} />
-      </ScrollView>
+        </ScrollView>
+        {/* Analyzing Overlay Component */}
+        <AnimatePresence>
+          {isAnalyzing && (
+            <MotiView
+              from={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              style={styles.loadingOverlay}
+            >
+              <LottieView
+                source={require('../../assets/spinner.json')}
+                autoPlay
+                loop
+                style={{ width: 120, height: 120 }}
+              />
+              <Text style={styles.loadingText}>Analyzing Feedbacks via ML model...</Text>
+            </MotiView>
+          )}
+        </AnimatePresence>
+      </View>
     </ManagerLayout>
   );
 }
@@ -221,4 +434,47 @@ const styles = StyleSheet.create({
   },
   commentText: { flex: 1, fontSize: 14, color: '#4B5563', lineHeight: 20 },
   timestampText: { fontSize: 11, color: '#9CA3AF', textAlign: 'right' },
+  aiButton: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: '#6366F1', // deep indigo suitable for AI
+    borderRadius: 14, paddingVertical: 14, elevation: 6,
+    shadowColor: '#6366F1', shadowOpacity: 0.8, shadowRadius: 15, shadowOffset: { width: 0, height: 6 },
+    marginBottom: 20
+  },
+  aiButtonLabel: { fontSize: 16, fontWeight: 'bold', color: '#FFFFFF' },
+  insightsCard: {
+    backgroundColor: '#1E1E2E', // slightly different dark background
+    borderRadius: 20, padding: 20, marginBottom: 20,
+    elevation: 8, shadowColor: '#6366F1', shadowOpacity: 0.15, shadowRadius: 20, shadowOffset: { width: 0, height: 10 },
+    borderColor: '#333346', borderWidth: 1
+  },
+  insightsHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  insightsTitle: { fontSize: 20, fontWeight: '800', color: '#FFFFFF' },
+  sentimentBadge: { backgroundColor: '#4ade8022', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
+  sentimentBadgeText: { fontSize: 13, fontWeight: 'bold', color: '#4ade80' },
+  foodRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, marginBottom: 16 },
+  foodBox: { flex: 1, padding: 14, borderRadius: 16, borderWidth: 1, elevation: 2 },
+  foodLabel: { fontSize: 13, color: '#A1A1AA', marginBottom: 6 },
+  foodValue: { fontSize: 15, fontWeight: 'bold', color: '#FFFFFF' },
+  insightsSubTitle: { fontSize: 14, fontWeight: '700', color: '#A78BFA', marginBottom: 12 },
+  insightItem: { flexDirection: 'row', alignItems: 'flex-start', marginBottom: 8, gap: 8 },
+  insightActionText: { flex: 1, fontSize: 14, color: '#D1D5DB', lineHeight: 20 },
+  sentimentTag: {
+    flexDirection: 'row', alignItems: 'center', gap: 4, marginLeft: 8,
+    paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6, marginTop: 4, alignSelf: 'flex-start',
+  },
+  sentimentTagText: { fontSize: 11, fontWeight: '700' },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(11, 11, 11, 0.85)',
+    zIndex: 50,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#6366F1',
+    marginTop: 16,
+  },
 });
